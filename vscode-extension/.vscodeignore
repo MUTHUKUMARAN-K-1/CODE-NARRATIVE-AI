@@ -1,0 +1,28 @@
+# Editor directories and files
+.vscode/
+.vscode-test/
+
+# Source files (not needed in package)
+src/
+tsconfig.json
+.eslintrc.json
+.prettierrc
+
+# Misc
+.DS_Store
+*.vsix
+node_modules/
+.git/
+.gitignore
+
+# Test files
+**/*.test.ts
+**/*.spec.ts
+test/
+
+# Only include the compiled output
+!out/
+!media/
+!package.json
+!LICENSE
+!README.md

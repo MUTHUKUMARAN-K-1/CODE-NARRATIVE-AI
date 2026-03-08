@@ -1,0 +1,979 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: CodeNarrative serverless backend
+
+Globals:
+  Api:
+    Cors:
+      AllowMethods: "'GET,POST,OPTIONS'"
+      AllowHeaders: "'Content-Type,Authorization'"
+      AllowOrigin: "'*'"
+  Function:
+    Runtime: python3.11
+    Timeout: 30
+    MemorySize: 512
+    Handler: index.lambda_handler
+    Environment:
+      Variables:
+        REPOS_TABLE_NAME: !Ref ReposTable
+        USERS_TABLE_NAME: !Ref UsersTable
+        TESTS_TABLE_NAME: !Ref TestsTable
+        BEDROCK_REGION: us-east-1
+        # DeepSeek-R1 on Amazon Bedrock (GA March 2025, us-east-1 only)
+        BEDROCK_MODEL_ID: us.deepseek.r1-v1:0
+        BEDROCK_MODEL_ID_HAIKU: us.deepseek.r1-v1:0
+        GITHUB_TOKEN: ""
+
+Resources:
+  ReposTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: repo_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: repo_id
+          KeyType: HASH
+
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: repo_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: repo_id
+          KeyType: RANGE
+
+  TestsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: repo_id
+          AttributeType: S
+        - AttributeName: test_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: repo_id
+          KeyType: HASH
+        - AttributeName: test_id
+          KeyType: RANGE
+
+  VideoJobsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: job_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: job_id
+          KeyType: HASH
+
+  VideoOutputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: [GET, HEAD]
+            AllowedOrigins: ["*"]
+            ExposedHeaders: [Content-Length, Content-Type]
+
+  VideoOutputBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref VideoOutputBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowBedrockAsyncOutput
+            Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub
+              - "arn:aws:s3:::${Bucket}/videos/*"
+              - Bucket: !Ref VideoOutputBucket
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  CodeNarrativeApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization,X-Requested-With'"
+        AllowOrigin: "'*'"
+      GatewayResponses:
+        DEFAULT_5XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+              Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Requested-With'"
+              Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+        DEFAULT_4XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+              Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Requested-With'"
+              Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+
+  RepoAnalysisFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/repo_analysis_handler.lambda_handler
+      Timeout: 30
+      Environment:
+        Variables:
+          USE_WEB_GROUNDING_REPO_ANALYSIS: "true"
+          DEPLOY_VERSION: "raw-http-v1"
+          REPO_ANALYSIS_WORKER_FUNCTION_NAME: !Ref RepoAnalysisWorkerFunction
+      Events:
+        Analyze:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/analyze
+            Method: post
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - "bedrock:InvokeModel"
+                - "bedrock:InvokeModelWithResponseStream"
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action: "lambda:InvokeFunction"
+              Resource: !GetAtt RepoAnalysisWorkerFunction.Arn
+
+  RepoAnalysisWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/repo_analysis_handler.worker_lambda_handler
+      Timeout: 120
+      Environment:
+        Variables:
+          USE_WEB_GROUNDING_REPO_ANALYSIS: "true"
+          USE_MULTIMODAL_REPO_ANALYSIS: "true"
+          BEDROCK_REGION: us-east-1
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeTool"
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - "aws-marketplace:ViewSubscriptions"
+                - "aws-marketplace:Subscribe"
+                - "aws-marketplace:Unsubscribe"
+              Resource: "*"
+
+  GetRepoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/get_repo_handler.lambda_handler
+      Events:
+        GetRepo:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/repos/{repo_id}
+            Method: get
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ReposTable
+
+  RepoFileContentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/file_content_handler.lambda_handler
+      Events:
+        GetFileContent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/repos/{repo_id}/files
+            Method: get
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+
+  RepoDashboardFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/dashboard_handler.lambda_handler
+      Timeout: 30
+      Events:
+        GetDashboard:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/repos/{repo_id}/dashboard
+            Method: get
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+
+  MatchDevelopersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/match_developers_handler.lambda_handler
+      Timeout: 30
+      Events:
+        MatchDevelopers:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/match-developers
+            Method: post
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+
+  SimulateImpactFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/simulate_impact_handler.lambda_handler
+      Timeout: 30
+      Events:
+        SimulateImpact:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/repos/{repo_id}/simulate-impact
+            Method: post
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+
+  ArchaeologyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/archaeology_handler.lambda_handler
+      Timeout: 90
+      Events:
+        Archaeology:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/archaeology
+            Method: post
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - "aws-marketplace:ViewSubscriptions"
+                - "aws-marketplace:Subscribe"
+                - "aws-marketplace:Unsubscribe"
+              Resource: "*"
+
+  TherapyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/therapy_handler.lambda_handler
+      Timeout: 90
+      Events:
+        Therapy:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/therapy
+            Method: post
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - "aws-marketplace:ViewSubscriptions"
+                - "aws-marketplace:Subscribe"
+                - "aws-marketplace:Unsubscribe"
+              Resource: "*"
+
+  RealityFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/reality_handler.lambda_handler
+      Timeout: 90
+      Events:
+        Reality:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/reality
+            Method: post
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - "aws-marketplace:ViewSubscriptions"
+                - "aws-marketplace:Subscribe"
+                - "aws-marketplace:Unsubscribe"
+              Resource: "*"
+
+  PokemonFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/pokemon_handler.lambda_handler
+      Timeout: 90
+      Events:
+        Pokemon:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/pokemon
+            Method: post
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - "aws-marketplace:ViewSubscriptions"
+                - "aws-marketplace:Subscribe"
+                - "aws-marketplace:Unsubscribe"
+              Resource: "*"
+
+  VideoStartFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/video_handler.video_start_handler
+      Timeout: 60
+      Environment:
+        Variables:
+          REPOS_TABLE_NAME: !Ref ReposTable
+          VIDEO_JOBS_TABLE_NAME: !Ref VideoJobsTable
+          VIDEO_OUTPUT_BUCKET: !Ref VideoOutputBucket
+      Events:
+        VideoStart:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/video/start
+            Method: post
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref VideoJobsTable
+        - Statement:
+            - Effect: Allow
+              Action: "s3:PutObject"
+              Resource: !Sub
+                - "arn:aws:s3:::${Bucket}/*"
+                - Bucket: !Ref VideoOutputBucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - "bedrock:InvokeModel"
+                - "bedrock:StartAsyncInvoke"
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - "aws-marketplace:ViewSubscriptions"
+                - "aws-marketplace:Subscribe"
+                - "aws-marketplace:Unsubscribe"
+              Resource: "*"
+
+  VideoStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/video_handler.video_status_handler
+      Timeout: 30
+      Environment:
+        Variables:
+          VIDEO_JOBS_TABLE_NAME: !Ref VideoJobsTable
+          VIDEO_OUTPUT_BUCKET: !Ref VideoOutputBucket
+      Events:
+        VideoStatus:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/video/status/{job_id}
+            Method: get
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref VideoJobsTable
+        - Statement:
+            - Effect: Allow
+              Action: "s3:GetObject"
+              Resource: !Sub
+                - "arn:aws:s3:::${Bucket}/*"
+                - Bucket: !Ref VideoOutputBucket
+        - Statement:
+            - Effect: Allow
+              Action: "s3:ListBucket"
+              Resource: !Sub
+                - "arn:aws:s3:::${Bucket}"
+                - Bucket: !Ref VideoOutputBucket
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:GetAsyncInvoke"
+              Resource: "*"
+
+  LearningPathFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/learning_path_handler.lambda_handler
+      Timeout: 90
+      Events:
+        LearningPath:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/learning-path
+            Method: post
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ReposTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - "aws-marketplace:ViewSubscriptions"
+                - "aws-marketplace:Subscribe"
+                - "aws-marketplace:Unsubscribe"
+              Resource: "*"
+
+  SmartQAFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/smart_qa_handler.lambda_handler
+      Events:
+        QA:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/qa
+            Method: post
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - "aws-marketplace:ViewSubscriptions"
+                - "aws-marketplace:Subscribe"
+                - "aws-marketplace:Unsubscribe"
+              Resource: "*"
+
+  ExplanationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/explanation_handler.lambda_handler
+      Events:
+        Explain:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/explain
+            Method: post
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - "aws-marketplace:ViewSubscriptions"
+                - "aws-marketplace:Subscribe"
+                - "aws-marketplace:Unsubscribe"
+              Resource: "*"
+
+  ArchitectureFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/architecture_handler.lambda_handler
+      Events:
+        Architecture:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/architecture
+            Method: post
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - "aws-marketplace:ViewSubscriptions"
+                - "aws-marketplace:Subscribe"
+                - "aws-marketplace:Unsubscribe"
+              Resource: "*"
+
+  ProgressFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/progress_handler.get_progress
+      Events:
+        GetProgress:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/progress/{uid}/{rid}
+            Method: get
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+
+  ProgressUpdateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/progress_handler.update_progress
+      Events:
+        UpdateProgress:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/progress/update
+            Method: post
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+
+  QuizScoreFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/progress_handler.record_quiz_score
+      Events:
+        QuizScore:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/progress/quiz-score
+            Method: post
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+
+  LegacyTestsGenerateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/legacy_test_handler.generate_tests
+      Events:
+        GenerateTests:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/tests/generate
+            Method: post
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TestsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - "aws-marketplace:ViewSubscriptions"
+                - "aws-marketplace:Subscribe"
+                - "aws-marketplace:Unsubscribe"
+              Resource: "*"
+
+  LegacyTestsListFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/legacy_test_handler.list_tests
+      Events:
+        ListTests:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/tests/{repo_id}
+            Method: get
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref TestsTable
+
+  ExplainLineFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/explain_line_handler.lambda_handler
+      Events:
+        ExplainLine:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/explain-line
+            Method: post
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+
+  GlossaryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/glossary_handler.lambda_handler
+      Events:
+        Glossary:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/glossary
+            Method: post
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+
+  RunbookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/runbook_handler.lambda_handler
+      Events:
+        Runbook:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/runbook
+            Method: post
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+
+  WhereUsedFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/where_used_handler.lambda_handler
+      Events:
+        WhereUsed:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/where-used
+            Method: post
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+
+  TestFeedbackFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/test_feedback_handler.lambda_handler
+      Events:
+        TestFeedback:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/test-feedback
+            Method: post
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+
+  OneSlideArchitectureFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/one_slide_architecture_handler.lambda_handler
+      Events:
+        OneSlideArchitecture:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/one-slide-architecture
+            Method: post
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+
+  CriticalPathFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/critical_path_handler.lambda_handler
+      Events:
+        CriticalPath:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/critical-path
+            Method: post
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+
+  WorkflowFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/workflow_handler.lambda_handler
+      Events:
+        Workflow:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/workflow
+            Method: post
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+
+  CompareReposFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/compare_repos_handler.lambda_handler
+      Events:
+        CompareRepos:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/compare-repos
+            Method: post
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+
+  KeyTakeawaysFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/key_takeaways_handler.lambda_handler
+      Events:
+        KeyTakeaways:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/key-takeaways
+            Method: post
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+
+  ReviewFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/review_handler.lambda_handler
+      Events:
+        Review:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/review
+            Method: get
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+
+  DigestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/digest_handler.lambda_handler
+      Events:
+        Digest:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/digest
+            Method: get
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+
+  KnowledgeMapFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/knowledge_map_handler.lambda_handler
+      Events:
+        KnowledgeMap:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/knowledge-map
+            Method: get
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action: "bedrock:InvokeModel"
+              Resource: "*"
+
+  PRReviewFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handlers/pr_review_handler.lambda_handler
+      Timeout: 90
+      Events:
+        PRReview:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CodeNarrativeApi
+            Path: /api/pr-review
+            Method: post
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReposTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - "bedrock:InvokeModel"
+                - "bedrock:InvokeModelWithResponseStream"
+              Resource: "*"
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${CodeNarrativeApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"

@@ -1,0 +1,222 @@
+{
+  "name": "code-narrative-ai",
+  "displayName": "Code Narrative AI",
+  "description": "Narrative-style explanations, summaries, and documentation generation for your code, directly inside VS Code.",
+  "version": "0.1.0",
+  "publisher": "prabhu2006",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MUTHUKUMARAN-K-1/CODE-NARRATIVE-AI.git"
+  },
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#0a0a0c",
+    "theme": "dark"
+  },
+  "keywords": ["ai", "code narrative", "explain", "documentation", "pixel office"],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Programming Languages"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codeNarrative.explainSelection",
+        "title": "Code Narrative AI: Explain Selection",
+        "category": "Code Narrative AI"
+      },
+      {
+        "command": "codeNarrative.summarizeFile",
+        "title": "Code Narrative AI: Summarize File",
+        "category": "Code Narrative AI"
+      },
+      {
+        "command": "codeNarrative.openChat",
+        "title": "Code Narrative AI: Open Chat",
+        "category": "Code Narrative AI"
+      },
+      {
+        "command": "codeNarrative.openDashboard",
+        "title": "Code Narrative AI: Open Dashboard",
+        "category": "Code Narrative AI"
+      },
+      {
+        "command": "codeNarrative.reviewCode",
+        "title": "Code Narrative AI: Review Code",
+        "category": "Code Narrative AI"
+      },
+      {
+        "command": "codeNarrative.changelog",
+        "title": "Code Narrative AI: Generate Changelog",
+        "category": "Code Narrative AI"
+      },
+      {
+        "command": "codeNarrative.prDescription",
+        "title": "Code Narrative AI: Generate PR Description",
+        "category": "Code Narrative AI"
+      },
+      {
+        "command": "codeNarrative.annotateFile",
+        "title": "Code Narrative AI: Annotate File",
+        "category": "Code Narrative AI"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "codeNarrative.explainSelection",
+          "group": "codeNarrative@1",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "codeNarrative.summarizeFile",
+          "group": "codeNarrative@2"
+        },
+        {
+          "command": "codeNarrative.reviewCode",
+          "group": "codeNarrative@3"
+        },
+        {
+          "command": "codeNarrative.annotateFile",
+          "group": "codeNarrative@4"
+        }
+      ],
+      "commandPalette": [
+        { "command": "codeNarrative.explainSelection" },
+        { "command": "codeNarrative.summarizeFile" },
+        { "command": "codeNarrative.openChat" },
+        { "command": "codeNarrative.openDashboard" },
+        { "command": "codeNarrative.reviewCode" },
+        { "command": "codeNarrative.changelog" },
+        { "command": "codeNarrative.prDescription" },
+        { "command": "codeNarrative.annotateFile" }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codeNarrative",
+          "title": "Code Narrative AI",
+          "icon": "media/icon.png"
+        }
+      ],
+      "panel": [
+        {
+          "id": "codeNarrativeOffice",
+          "title": "Code Narrative Office",
+          "icon": "media/icon.png"
+        }
+      ]
+    },
+    "views": {
+      "codeNarrative": [
+        {
+          "id": "codeNarrative.chatView",
+          "name": "Chat",
+          "type": "webview"
+        },
+        {
+          "id": "codeNarrative.dashboardView",
+          "name": "Dashboard",
+          "type": "webview"
+        }
+      ],
+      "codeNarrativeOffice": [
+        {
+          "id": "codeNarrative.officeView",
+          "name": "Pixel Office",
+          "type": "webview"
+        }
+      ]
+    },
+    "configuration": {
+      "type": "object",
+      "title": "Code Narrative AI",
+      "properties": {
+        "codeNarrative.backendType": {
+          "type": "string",
+          "enum": [
+            "local",
+            "remote"
+          ],
+          "default": "remote",
+          "description": "Where Code Narrative AI requests are sent (local server or remote API)."
+        },
+        "codeNarrative.baseUrl": {
+          "type": "string",
+          "default": "https://api.your-code-narrative.ai",
+          "description": "Base URL for the Code Narrative AI HTTP API."
+        },
+        "codeNarrative.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for the remote Code Narrative AI service (stored securely when possible)."
+        },
+        "codeNarrative.narrativeLevel": {
+          "type": "string",
+          "enum": [
+            "short",
+            "detailed"
+          ],
+          "default": "detailed",
+          "description": "Default level of detail for generated narratives."
+        },
+        "codeNarrative.office.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the Pixel Office view for visualizing Code Narrative AI sessions."
+        },
+        "codeNarrative.office.theme": {
+          "type": "string",
+          "enum": ["night", "sunrise", "neon", "forest"],
+          "enumDescriptions": [
+            "Dark orange theme (default)",
+            "Warm amber and cream tones",
+            "Cyberpunk purple and cyan",
+            "Green and earthy tones"
+          ],
+          "default": "night",
+          "description": "Visual theme for the Pixel Office."
+        },
+        "codeNarrative.office.soundEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Play notification sounds when AI sessions complete in the Pixel Office."
+        },
+        "codeNarrative.office.autoSpawnAgents": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically create visual agents for new Code Narrative AI sessions."
+        },
+        "codeNarrative.office.maxAgents": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Maximum number of visible agents in the Pixel Office view."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "node ./out/test/runTest.js",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^25.3.3",
+    "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^2.3.0",
+    "glob": "^11.0.0",
+    "typescript": "^5.4.0",
+    "vsce": "^2.15.0"
+  }
+}
